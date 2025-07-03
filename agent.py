@@ -1,37 +1,40 @@
-# main.py
 import os
-from datetime import timedelta
+import yaml
 from metadata.generated.schema.api.data.createDataContract import CreateDataContractRequest
-from metadata.generated.schema.entity.data.dataContract import DataContract, ContractStatus
-from metadata.generated.schema.entity.data.table import Column, DataType, Table
+from metadata.generated.schema.entity.data.dataContract import ContractStatus, SchemaField
+from metadata.generated.schema.entity.data.table import Table
 from metadata.generated.schema.tests.testCase import TestCase
 from metadata.generated.schema.type.entityReference import EntityReference
 from metadata.ingestion.ometa.ometa_api import OpenMetadata
 from metadata.generated.schema.security.client.openMetadataJWTClientConfig import OpenMetadataJWTClientConfig
 from metadata.generated.schema.entity.services.connections.metadata.openMetadataConnection import OpenMetadataConnection, AuthProvider
+from metadata.generated.schema.entity.data.dataContract import QualityExpectation
+import uuid
 from dotenv import load_dotenv
+
 # Load environment variables from .env file
 load_dotenv(override=True)
-def create_wind_farm_data_contract():
+
+def load_contract_yaml(yaml_path):
+    with open(yaml_path, 'r', encoding='utf-8') as f:
+        return yaml.safe_load(f)
+
+def create_wind_farm_data_contract_from_yaml(yaml_path):
     """
-    This agent script creates and applies the Wind Farm Data Contract to a table
-    in OpenMetadata, based on the specifications in the playbook.
-    
-    This version dynamically fetches the schema from the existing table metadata.
-    
+    Load a Data Contract from YAML and apply it to a table in OpenMetadata.
     Prerequisites:
-    1. The target table must exist in OpenMetadata with a defined schema.
-    2. The Data Quality tests referenced in the contract must already be created
-       and associated with the target table.
-    3. The following environment variables must be set:
-       - OPENMETADATA_URL: The URL of your OpenMetadata server (e.g., http://localhost:8585/api)
-       - OPENMETADATA_JWT_TOKEN: The JWT token for authentication.
+      - The target table must exist in OpenMetadata with a defined schema.
+      - Data Quality tests referenced in the contract must already be created.
+      - The following environment variables must be set:
+        OMD_API_URL, OMD_JWT_TOKEN
     """
     try:
-        # --- 1. Configure Connection to OpenMetadata ---
+        print("[STEP 1] Configure Connection to OpenMetadata...")
         OMD_JWT_TOKEN = os.environ.get("OMD_JWT_TOKEN")
         OMD_API_URL = os.environ.get("OMD_API_URL")
-        TABLE_FQN = os.environ.get("TABLE_FQN")
+        if not all([OMD_JWT_TOKEN, OMD_API_URL]):
+            print("[STEP 1] Error: OMD_JWT_TOKEN and OMD_API_URL environment variables must be set.")
+            return
         security_config = OpenMetadataJWTClientConfig(jwtToken=OMD_JWT_TOKEN)
         server_config = OpenMetadataConnection(
             hostPort=OMD_API_URL,
@@ -40,97 +43,159 @@ def create_wind_farm_data_contract():
         )
         omd_client = OpenMetadata(server_config)
         omd_client.health_check()
+        print(f"[STEP 1] Successfully connected to OpenMetadata at {OMD_API_URL}")
 
-        # --- 2. Define Target Asset and Required Test Cases ---
-        # The FQN (Fully Qualified Name) of the table the contract applies to.
-        # Replace with your actual table FQN.
-        table_entity = omd_client.get_by_name(entity=Table, fqn=TABLE_FQN, fields=["columns"])
-
+        print(f"[STEP 2] Load contract YAML from {yaml_path} ...")
+        contract_dict = load_contract_yaml(yaml_path)
+        table_name = os.environ.get("TABLE_FQN")
+        if not table_name:
+            print("[STEP 2] Error: 'name' field missing in contract YAML.")
+            return
+        table_entity = omd_client.get_by_name(entity=Table, fqn=table_name, fields=["columns"])
         if not table_entity:
-            print(f"Error: Table '{TABLE_FQN}' not found. Please create it first.")
+            print(f"[STEP 2] Error: Table '{table_name}' not found. Please create it first.")
             return
+        print(f"[STEP 2] Found target data asset: {table_name}")
 
-        print(f"Found target data asset: {TABLE_FQN}")
-        # Get references to the Data Quality tests defined in the playbook.
-        # These tests MUST exist before running this script.
-        print("Fetching required Data Quality tests...")
-        quality_test_fqns = [
-            f"{TABLE_FQN}.id.columnValuesToBeUnique",
-            f"{TABLE_FQN}.installed_capacity_pos.columnValueMinToBe",
-            f"{TABLE_FQN}.location.geo_coordinate.latitude.columnValueToBeBetween",
-            f"{TABLE_FQN}.location.geo_coordinate.longitude.columnValueToBeBetween",
-            f"{TABLE_FQN}.grid_properties.tso_code.columnValuesToMatchRegex",
-            f"{TABLE_FQN}.wind_farm_properties.hub_height.columnValueToBeBetween"
-        ]
-        
-        test_references = []
-        for test_fqn in quality_test_fqns:
-            test_case = omd_client.get_by_name(entity=TestCase, fqn=test_fqn)
-            if test_case:
-                test_references.append(EntityReference(id=test_case.id, type="testCase"))
-                print(f"  - Found test: {test_fqn}")
-            else:
-                print(f"  - Warning: Test case '{test_fqn}' not found. It will be skipped in the contract.")
+        # Map YAML schema fields to SchemaField objects
+        allowed_types = {
+            "RECORD", "NULL", "BOOLEAN", "INT", "LONG", "BYTES", "FLOAT", "DOUBLE",
+            "TIMESTAMP", "TIMESTAMPZ", "TIME", "DATE", "STRING", "ARRAY", "MAP",
+            "ENUM", "UNION", "FIXED", "ERROR", "UNKNOWN"
+        }
+        type_map = {
+            "NUMBER": "DOUBLE",
+            "INTEGER": "INT",
+            "FLOAT": "FLOAT",
+            "DECIMAL": "DOUBLE",
+            "STRING": "STRING",
+            "BOOLEAN": "BOOLEAN",
+            "TIMESTAMP": "TIMESTAMP",
+            "DATE": "DATE",
+            "ARRAY": "ARRAY",
+            "OBJECT": "RECORD",
+            "MAP": "MAP"
+        }
+        schema_fields = []
+        for field in contract_dict.get('schema', {}).get('fields', []):
+            raw_type = field.get('type', 'STRING').upper()
+            dtype = type_map.get(raw_type, raw_type)
+            if dtype not in allowed_types:
+                dtype = "STRING"
+            schema_fields.append(
+                SchemaField(
+                    name=field.get('name'),
+                    dataType=dtype,
+                    description=field.get('description'),
+                    displayName=field.get('name'),
+                    fullyQualifiedName=f"{table_name}.{field.get('name')}",
+                    tags=None
+                )
+            )
+        print(f"[STEP 3] Schema Contract defined with {len(schema_fields)} columns.")
 
-        # --- 3. Construct the Data Contract from the Playbook ---
-        print("\nConstructing Data Contract...")
-        
-        # Part A: Schema Contract (Dynamically fetched from existing table metadata)
-        print("  - Fetching schema dynamically from the database...")
-        if not table_entity.columns:
-            print("Error: No columns found for the table. Cannot create schema contract.")
-            return
-        print("  - Schema Contract defined with the following columns:")
-        for column in table_entity.columns:
-            print(f"    - {column.name} ({column.dataType.value})") 
-        # Define the schema contract using the table's columns
-        # Note: Ensure that the columns are of type Column and have valid data types.
-        # This is a simplified example; you may need to adjust based on your actual column definitions.
-           
+        # Map YAML quality expectations to OpenMetadata format
+        quality_expectations = []
+        for q in contract_dict.get('quality', []):
+            definition = q.get('implementation') or q.get('description') or q.get('name')
+            # Only set allowed fields for QualityExpectation
+            qe_kwargs = {
+                'name': q.get('name'),
+                'definition': definition
+            }
+            # Only add raiseIncident if the model allows it (if not, skip)
+            try:
+                quality_expectations.append(QualityExpectation(**qe_kwargs))
+            except TypeError:
+                # If raiseIncident is allowed in your OpenMetadata version, add it here
+                pass
+        print(f"[STEP 4] Data Quality Contract defined with {len(quality_expectations)} expectations.")
+
+        print("[STEP 5] Assemble and Submit the Data Contract...")
+        contract_request = None
         try:
-            schema_contract = DataContract.Schema(columns=table_entity.columns)
-            print(f"  - Schema Contract defined with {len(table_entity.columns)} columns.")
+            contract_request = CreateDataContractRequest(
+                name=f"{table_entity.name.root}_contract",
+                displayName=f"{table_entity.displayName} Contract",
+                description=contract_dict.get('description', {}).get('purpose', ''),
+                entity=EntityReference(id=table_entity.id, type="table"),
+                status=ContractStatus.Active,
+                schema=schema_fields,
+                qualityExpectations=quality_expectations
+            )
         except Exception as e:
-            print(f"Error creating schema contract: {e} {schema_contract}")
+            print(f"[STEP 5] Error: Failed to assemble Data Contract: {e}")
+        if not contract_request or not contract_request.entity:
+            print("[STEP 5] Error: Entity is empty. Cannot submit Data Contract.")
             return
-        # Note: The schema contract can be more complex, including nested structures, etc.
-        # Part B: Data Quality Contract
-        quality_contract = DataContract.Quality(tests=test_references)
-        print(f"  - Data Quality Contract defined with {len(test_references)} tests.")
+        print("[STEP 6] Submitting Data Contract to OpenMetadata...")
+        print("[STEP 6] Please wait, this may take a few seconds...")
+        print(f"[STEP 6] Target Table: {table_name}")
 
-        # Part C: Data Freshness Contract (24 hours)
-        freshness_contract = DataContract.Freshness(
-            updateFrequency=timedelta(days=1)
-        )
-        print("  - Data Freshness Contract defined for updates every 24 hours.")
+        created_contract = None
+        try:
+            # Use the REST API as a fallback if the SDK fails
+            created_contract = omd_client.create_or_update(contract_request)
+        except Exception as e:
+            print(f"[STEP 6] Error: Failed to create or update Data Contract via SDK: {e}")
+            # Fallback: Try direct REST API upload
+            import requests
+            import json
+            try:
+                api_url = f"{OMD_API_URL.rstrip('/')}/v1/dataContracts"
+                headers = {
+                    "Authorization": f"Bearer {OMD_JWT_TOKEN}",
+                    "Content-Type": "application/json"
+                }
+                # Convert contract_request to dict, then to JSON
+                contract_dict_api = contract_request.model_dump() if hasattr(contract_request, 'model_dump') else contract_request.dict()
+                # Fix: Convert all enum values and UUIDs to serializable types for JSON serialization
 
-        # Assemble the full contract request
-        contract_request = CreateDataContractRequest(
-            name=f"{table_entity.name.root}_contract",
-            displayName=f"{table_entity.displayName} Contract",
-            description=f"Data Contract for the {table_entity.displayName} data asset, enforced by an automated agent.",
-            dataAsset=EntityReference(id=table_entity.id, type="table"),
-            status=ContractStatus.Active, # Set to Draft for review, or Active to enforce immediately
-            schema=schema_contract,
-            quality=quality_contract,
-            freshness=freshness_contract
-        )
-
-        # --- 4. Create or Update the Data Contract in OpenMetadata ---
-        print("\nSubmitting Data Contract to OpenMetadata...")
-        created_contract = omd_client.create_or_update(data=contract_request)
-
+                def enum_to_value(obj):
+                    if isinstance(obj, list):
+                        return [enum_to_value(i) for i in obj]
+                    elif isinstance(obj, dict):
+                        return {k: enum_to_value(v) for k, v in obj.items()}
+                    elif hasattr(obj, 'value'):
+                        return obj.value
+                    elif isinstance(obj, uuid.UUID):
+                        return str(obj)
+                    else:
+                        return obj
+                contract_dict_api = enum_to_value(contract_dict_api)
+                # Remove any keys ending with '_' (e.g., schema_) that are not valid in the API
+                def remove_trailing_underscore_keys(obj):
+                    if isinstance(obj, list):
+                        return [remove_trailing_underscore_keys(i) for i in obj]
+                    elif isinstance(obj, dict):
+                        # Only keep keys that do not end with '_' and are not private (do not start with '_')
+                        return {k.rstrip('_'): remove_trailing_underscore_keys(v) for k, v in obj.items() if not k.endswith('_') and not k.startswith('_')}
+                    else:
+                        return obj
+                contract_dict_api = remove_trailing_underscore_keys(contract_dict_api)
+                response = requests.post(api_url, headers=headers, data=json.dumps(contract_dict_api))
+                if response.status_code in (200, 201):
+                    print("[STEP 6] --- Success (REST API fallback)! ---")
+                    print(f"[STEP 6] Data Contract created/updated via REST API. Status: {response.status_code}")
+                    print(f"[STEP 6] View it in OpenMetadata: {OMD_API_URL}/v1/dataContracts")
+                else:
+                    print(f"[STEP 6] --- Error (REST API fallback) ---")
+                    print(f"[STEP 6] Response: {response.status_code} {response.text}")
+                return
+            except Exception as e2:
+                print(f"[STEP 6] Error: REST API fallback also failed: {e2}")
+                return
         if created_contract:
-            print("\n--- Success! ---")
-            print(f"Data Contract '{created_contract.displayName}' is now {created_contract.status.value}.")
-            print(f"Applied to: {created_contract.dataAsset.fullyQualifiedName}")
-            print(f"View it in OpenMetadata: {OMD_API_URL.replace('/api', '')}/table/{TABLE_FQN}/contracts")
+            print("[STEP 6] --- Success! ---")
+            print(f"[STEP 6] Data Contract '{created_contract.displayName}' is now {created_contract.status.value}.")
+            print(f"[STEP 6] Applied to: {created_contract.entity.fullyQualifiedName}")
+            print(f"[STEP 6] View it in OpenMetadata: {OMD_API_URL}/v1/dataContracts")
         else:
-            print("\n--- Error ---")
-            print("Failed to create or update the Data Contract.")
-
+            print("[STEP 6] --- Error ---")
+            print("[STEP 6] Failed to create or update the Data Contract.")
     except Exception as e:
-        print(f"\nAn unexpected error occurred: {e}")
+        print(f"\n[STEP 0] Error: An unexpected error occurred: {e}")
 
 if __name__ == "__main__":
-    create_wind_farm_data_contract()
+    # Path to your contract.yaml file
+    create_wind_farm_data_contract_from_yaml("contract.yaml")

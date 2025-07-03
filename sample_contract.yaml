@@ -1,0 +1,97 @@
+apiVersion: v1
+kind: DataContract
+name: prod.kafka.customer_signups
+domain: customer
+dataProduct: signups
+description:
+  purpose: "Capture user signup events from production systems for analytics."
+  limitations: "Contains PII (emails); ensure compliance with privacy regulations."
+  usage: "Feeds downstream analytics and user onboarding metrics."
+owners:
+  - name: "Data Streaming Team"
+    type: team
+  - name: "john.smith"
+    type: user
+tags: ["customer", "signups", "PII"]
+
+schema:
+  fields:
+    - name: event_id
+      type: string
+      description: "Unique identifier for the signup event."
+      constraints:
+        not_null: true
+    - name: customer_id
+      type: string
+      description: "Unique identifier of the customer who signed up."
+      constraints:
+        not_null: true
+    - name: signup_time
+      type: timestamp
+      description: "Timestamp when the signup occurred."
+      constraints:
+        not_null: true
+        no_future_dates: true
+    - name: signup_source
+      type: string
+      description: "Channel through which the signup occurred (e.g., web or mobile)."
+      constraints:
+        enum: ["web", "mobile", "partner"]
+    - name: email
+      type: string
+      description: "Email address provided by the customer at signup."
+      constraints:
+        not_null: true
+        check_pii: true
+
+semantics:
+  - "Each record represents one customer signup event."
+  - "A given customer_id should have at most one signup event (no duplicate signups for the same customer)."
+
+security:
+  classification: "Sensitive"
+  compliance: ["GDPR", "CCPA"]
+  encryption: "TLS encryption in transit"
+  access: "Limited to authorized internal consumers due to PII."
+
+quality:
+  - name: "Unique Event ID"
+    description: "No duplicate event_id across messages."
+    type: custom
+    engine: openmetadata
+    implementation: |
+      type: duplicate_count
+      columns:
+        - event_id
+      must_be_equal_to: 0
+  - name: "Valid Email Format"
+    description: "Email field should match standard email pattern."
+    type: custom
+    engine: greatexpectations
+    implementation: |
+      expectation_type: expect_column_values_to_match_regex
+      kwargs:
+        column: email
+        regex: "^[A-Za-z0-9+_.-]+@[A-Za-z0-9.-]+$"
+  - name: "Daily Volume Threshold"
+    description: "At least 50 signup events should arrive per day."
+    type: sql
+    query: "SELECT COUNT(*) FROM prod.kafka.customer_signups WHERE DATE(signup_time) = CURRENT_DATE"
+    mustBeGreaterOrEqualTo: 50
+
+sla:
+  dataRetention: "7 days"
+  maxLatency: "5 seconds"
+  throughput: ">= 500 events/minute"
+  availability: "99.9%"
+  producers:
+    - name: "Auth Service"
+      type: application
+      description: "Microservice producing signup events to Kafka."
+  consumers:
+    - name: "Ingestion Pipeline"
+      type: pipeline
+      description: "Pipeline consuming events into the data warehouse."
+    - name: "Realtime Dashboard"
+      type: application
+      description: "Application consuming events for live signup metrics.”

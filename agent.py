@@ -173,14 +173,22 @@ def create_wind_farm_data_contract_from_yaml(yaml_path):
                     else:
                         return obj
                 contract_dict_api = remove_trailing_underscore_keys(contract_dict_api)
+                # Try POST first
                 response = requests.post(api_url, headers=headers, data=json.dumps(contract_dict_api))
                 if response.status_code in (200, 201):
-                    print("[STEP 6] --- Success (REST API fallback)! ---")
-                    print(f"[STEP 6] Data Contract created/updated via REST API. Status: {response.status_code}")
+                    print("[STEP 6] --- Success (REST API fallback, POST)! ---")
+                    print(f"[STEP 6] Data Contract created via REST API. Status: {response.status_code}")
                     print(f"[STEP 6] View it in OpenMetadata: {OMD_API_URL}/v1/dataContracts")
                 else:
-                    print(f"[STEP 6] --- Error (REST API fallback) ---")
-                    print(f"[STEP 6] Response: {response.status_code} {response.text}")
+                    print(f"[STEP 6] POST failed with status {response.status_code}, trying PUT...")
+                    response = requests.put(api_url, headers=headers, data=json.dumps(contract_dict_api))
+                    if response.status_code in (200, 201):
+                        print("[STEP 6] --- Success (REST API fallback, PUT)! ---")
+                        print(f"[STEP 6] Data Contract updated via REST API. Status: {response.status_code}")
+                        print(f"[STEP 6] View it in OpenMetadata: {OMD_API_URL}/v1/dataContracts")
+                    else:
+                        print(f"[STEP 6] --- Error (REST API fallback, PUT) ---")
+                        print(f"[STEP 6] Response: {response.status_code} {response.text}")
                 return
             except Exception as e2:
                 print(f"[STEP 6] Error: REST API fallback also failed: {e2}")

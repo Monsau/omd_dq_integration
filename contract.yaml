@@ -1,0 +1,213 @@
+apiVersion: v1
+kind: DataContract
+name: wind-farm
+# domain and dataProduct can be customized as needed
+# domain: energy
+# dataProduct: wind-farm-assets
+description:
+  purpose: "Contract for wind-farm asset data, ensuring quality, compliance, and operational readiness."
+  limitations: "Contains sensitive operational and location data; ensure compliance with relevant regulations."
+  usage: "Supports grid management, analytics, and regulatory reporting."
+owners:
+  - name: "Wind Asset Management Team"
+    type: team
+    notification_channel: "web"
+  - name: "asset.owner@example.com"
+    type: user
+    notification_channel: "email"
+tags: ["wind-farm", "energy", "asset"]
+
+schema:
+  fields:
+    - name: id
+      type: string
+      description: "Unique wind-farm identifier (UUID)."
+      constraints:
+        not_null: true
+    - name: name
+      type: string
+      description: "Wind-farm name."
+      constraints:
+        not_null: true
+    - name: customer_id
+      type: string
+      description: "Customer/project identifier."
+      constraints:
+        not_null: true
+    - name: entity_type
+      type: string
+      description: "Entity type (should be 'wind-farm')."
+      constraints:
+        enum: ["wind-farm"]
+    - name: tags
+      type: array
+      description: "List of tags."
+    - name: installed_capacity_pos
+      type: number
+      description: "Installed positive capacity (kW)."
+    - name: installed_capacity_neg
+      type: number
+      description: "Installed negative capacity (kW)."
+    - name: contract_number
+      type: string
+      description: "Contract number (if any)."
+    - name: location
+      type: object
+      description: "Location details (geo coordinates, postal code)."
+    #- name: metering_identifiers  # Comment out this field definition
+    #  type: array
+    #  description: "Metering identifiers (text[])."
+    - name: external_identifiers
+      type: array
+      description: "External identifiers."
+    - name: marketing_properties
+      type: object
+      description: "Marketing properties."
+    - name: marketing_properties_list
+      type: array
+      description: "List of marketing properties (jsonb array)."
+    - name: grid_properties
+      type: object
+      description: "Grid connection properties."
+    - name: wind_farm_properties
+      type: object
+      description: "Wind-farm specific properties (hub height, offshore)."
+
+semantics:
+  - "Each record represents one wind-farm asset."
+  - "The 'id' field must be unique across all wind-farm records."
+
+security:
+  classification: "Confidential"
+  compliance: ["ISO27001"]
+  encryption: "TLS encryption in transit"
+  access: "Limited to authorized internal users."
+
+quality:
+  - name: "Unique Wind-Farm ID"
+    description: "No duplicate id across wind-farm records."
+    type: custom
+    engine: openmetadata
+    implementation: |
+      type: duplicate_count
+      columns:
+        - id
+      must_be_equal_to: 0
+  - name: "Valid Installed Capacity"
+    description: "Installed positive capacity must be greater than zero."
+    type: custom
+    engine: openmetadata
+    implementation: |
+      type: column_value_range
+      column: installed_capacity_pos
+      min_value: 0.1
+  - name: "Valid Location Coordinates"
+    description: "Latitude and longitude must be within valid ranges."
+    type: custom
+    engine: openmetadata
+    implementation: |
+      type: geo_coordinate_range
+      column_latitude: location.geo_coordinate.latitude
+      column_longitude: location.geo_coordinate.longitude
+      latitude_range: [-90, 90]
+      longitude_range: [-180, 180]
+  - name: "Non-null Name"
+    description: "Wind-farm name must not be null or empty."
+    type: custom
+    engine: openmetadata
+    implementation: |
+      type: not_null
+      column: name
+  - name: "Non-null Customer ID"
+    description: "Customer/project identifier must not be null or empty."
+    type: custom
+    engine: openmetadata
+    implementation: |
+      type: not_null
+      column: customer_id
+  - name: "Entity Type Must Be 'wind-farm'"
+    description: "Entity type must always be 'wind-farm'."
+    type: custom
+    engine: openmetadata
+    implementation: |
+      type: column_value_enum
+      column: entity_type
+      allowed_values:
+        - wind-farm
+  - name: "Tags Format"
+    description: "Tags must be a list of strings."
+    type: custom
+    engine: openmetadata
+    implementation: |
+      type: array_of_strings
+      column: tags
+  - name: "Installed Capacity Negative Default"
+    description: "Installed negative capacity should be zero or greater."
+    type: custom
+    engine: openmetadata
+    implementation: |
+      type: column_value_range
+      column: installed_capacity_neg
+      min_value: 0
+  - name: "Contract Number Format"
+    description: "Contract number, if present, should be a string."
+    type: custom
+    engine: openmetadata
+    implementation: |
+      type: string_format
+      column: contract_number
+  #- name: "Metering Identifiers Format" # Comment out this quality check
+  #  description: "Metering identifiers must be a list of strings."
+  #  type: custom
+  #  engine: openmetadata
+  #  implementation: |
+  #    type: array_of_strings
+  #    column: metering_identifiers
+  - name: "External Identifiers Format"
+    description: "External identifiers must be a list of objects with 'type' and 'value'."
+    type: custom
+    engine: openmetadata
+    implementation: |
+      type: array_of_objects
+      column: external_identifiers
+      required_keys:
+        - type
+        - value
+  - name: "Marketing Properties Structure"
+    description: "Marketing properties must be a valid object."
+    type: custom
+    engine: openmetadata
+    implementation: |
+      type: object_structure
+      column: marketing_properties
+  - name: "Grid Properties Structure"
+    description: "Grid properties must be a valid object."
+    type: custom
+    engine: openmetadata
+    implementation: |
+      type: object_structure
+      column: grid_properties
+  - name: "Wind Farm Properties Structure"
+    description: "Wind-farm specific properties must be a valid object."
+    type: custom
+    engine: openmetadata
+    implementation: |
+      type: object_structure
+      column: wind_farm_properties
+
+sla:
+  dataRetention: "10 years"
+  maxLatency: "1 hour"
+  throughput: ">= 1 record/day"
+  availability: "99.5%"
+  producers:
+    - name: "Wind Farm SCADA System"
+      type: application
+      description: "System producing wind-farm operational data."
+  consumers:
+    - name: "Grid Management Platform"
+      type: application
+      description: "Platform consuming wind-farm data for grid operations."
+    - name: "Analytics Team"
+      type: team
+      description: "Team analyzing wind-farm performance and compliance."

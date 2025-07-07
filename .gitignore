@@ -17,7 +17,7 @@ __pycache__/
 # Ignore data and contract files
 wind-farm.json
 contract.json
-contract.yaml
+
 
 # Ignore OS files
 .DS_Store
